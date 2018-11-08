@@ -10,8 +10,6 @@ from scrapy.exceptions import DropItem
 class ElasticSearchPipeline(object):
 
     def __init__(self, settings) -> None:
-        super().__init__()
-
         es_timeout = settings.get('ELASTICSEARCH_TIMEOUT', 60)
         es_servers = settings.get('ELASTICSEARCH_SERVERS', 'localhost:9200')
         es_servers = es_servers if isinstance(es_servers, list) else [es_servers]
