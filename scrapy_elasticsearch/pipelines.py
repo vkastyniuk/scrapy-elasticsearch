@@ -2,10 +2,9 @@
 
 import hashlib
 import logging
-import types
 
 from elasticsearch import Elasticsearch, helpers
-from six import string_types
+from scrapy.exceptions import DropItem
 
 
 class ElasticSearchPipeline(object):
@@ -38,10 +37,30 @@ class ElasticSearchPipeline(object):
         self.es = Elasticsearch(**es_settings)
 
 
-class ElasticSearchItemPipeline(ElasticSearchPipeline):
+class ItemIdMixin(object):
 
     def __init__(self, settings) -> None:
-        super().__init__(settings)
+        self.settings = settings
+
+    def get_item_id(self, item):
+        unique_key = self.settings['ELASTICSEARCH_UNIQ_KEY']
+        if not unique_key:
+            return None
+
+        if isinstance(unique_key, list):
+            item_unique_key = '-'.join(map(lambda x: str(item[x]), unique_key))
+        else:
+            item_unique_key = str(item[unique_key])
+
+        return hashlib.sha1(item_unique_key.encode('utf-8')).hexdigest()
+
+
+class ElasticSearchItemPipeline(ElasticSearchPipeline, ItemIdMixin):
+
+    def __init__(self, settings) -> None:
+        ElasticSearchPipeline.__init__(self, settings)
+        ItemIdMixin.__init__(self, settings)
+
         self.items_buffer = []
 
     @classmethod
@@ -52,23 +71,6 @@ class ElasticSearchItemPipeline(ElasticSearchPipeline):
 
         return cls(crawler.settings)
 
-    def get_id(self, item):
-        unique_key = self.settings['ELASTICSEARCH_UNIQ_KEY']
-        if not unique_key:
-            return None
-
-        if isinstance(unique_key, list):
-            item_unique_key = '-'.join(map(lambda x: str(item[x]), unique_key))
-        else:
-            item_unique_key = item[unique_key]
-
-        if isinstance(item_unique_key, string_types):
-            item_unique_key = item_unique_key.encode('utf-8')
-        else:
-            raise Exception('unique key must be str or unicode')
-
-        return hashlib.sha1(item_unique_key).hexdigest()
-
     def index_item(self, item):
         index_action = {
             '_index': self.settings['ELASTICSEARCH_INDEX'],
@@ -76,7 +78,7 @@ class ElasticSearchItemPipeline(ElasticSearchPipeline):
             '_source': dict(item)
         }
 
-        item_id = self.get_id(item)
+        item_id = self.get_item_id(item)
         if item_id:
             index_action['_id'] = item_id
             logging.debug('Generated unique key %s' % item_id)
@@ -90,14 +92,35 @@ class ElasticSearchItemPipeline(ElasticSearchPipeline):
         self.items_buffer = []
 
     def process_item(self, item, spider):
-        if isinstance(item, types.GeneratorType) or isinstance(item, list):
-            for each in item:
-                self.process_item(each, spider)
-        else:
-            self.index_item(item)
-            logging.debug('Item sent to Elastic Search %s' % self.settings['ELASTICSEARCH_INDEX'])
-            return item
+        self.index_item(item)
+        logging.debug('Item sent to Elastic Search %s' % self.settings['ELASTICSEARCH_INDEX'])
+        return item
 
     def close_spider(self, spider):
         if len(self.items_buffer):
             self.send_items()
+
+
+class ElasticSearchFilterPipeline(ElasticSearchPipeline, ItemIdMixin):
+
+    def __init__(self, settings) -> None:
+        ElasticSearchPipeline.__init__(self, settings)
+        ItemIdMixin.__init__(self, settings)
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        for required_setting in ('ELASTICSEARCH_INDEX', 'ELASTICSEARCH_TYPE', 'ELASTICSEARCH_UNIQ_KEY'):
+            if not crawler.settings[required_setting]:
+                raise ValueError('%s is not defined' % required_setting)
+
+        return cls(crawler.settings)
+
+    def process_item(self, item, spider):
+        item_id = self.get_item_id(item)
+        if item_id and self.es.exists(
+                self.settings['ELASTICSEARCH_INDEX'],
+                self.settings['ELASTICSEARCH_TYPE'],
+                item_id):
+            raise DropItem("Item already exists: %s" % item)
+
+        return item
